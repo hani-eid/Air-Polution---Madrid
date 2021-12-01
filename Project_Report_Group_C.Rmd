@@ -1,0 +1,847 @@
+---
+output: html_document
+resource_files:
+- Images/DataMonkeys.png
+- Images/IE_logo.png
+runtime: shiny
+---
+
+<div id="bg" style="height:150px;width:150px; float=left; clear=true; margin-left:45%">
+  <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/c/ce/IE_University_logo.svg/1200px-IE_University_logo.svg.png" style="width:100%; height:100%;">
+</div> 
+
+#<span style="color:grey; margin-left:28%">Statistical Programming - R</span>
+#<span style="color:black; margin-left:35%; font-size:16pt;">Professor: Sirio Sobrino Uranga</span>
+#<span style="color:red; margin-left:37%; font-size:16pt;">Group C (aka DataMonkeys)</span>
+#<img src="http://datamonkey.pro/static/images/mon1.png" style="width:10%; height:10%; margin-left:47%">
+
+
+#<span style="color:black; margin-left:30%; font-size:22pt;"><u>Air Pollution Analysis in Madrid</u></span>
+
+#</br>
+
+###<span style="color:blue; text-decoration:underline">DATA INGESTION</span>
+
+```{r message=FALSE, warning=FALSE}
+library(openxlsx)
+library(data.table)
+library(sqldf)
+library(magrittr)
+library(xts)
+library(zoo)
+library(lubridate)
+library(ggplot2)
+library(gridExtra)
+library(kableExtra)
+library(knitr)
+library(plotly)
+library(dygraphs)
+library(plyr)
+library(corrplot)
+library(car)
+
+#Setting WD
+setwd("Workgroup_Data_Files")
+
+#DATA INGESTION ####
+
+#Function to process the files
+processFiles = function(fileName){
+  
+  underscoresInd = unlist(gregexpr(pattern = "_", fileName))
+  start =underscoresInd[2]
+  underscoreDateInd = underscoresInd[3]
+  stop = unlist(gregexpr(pattern = "\\.", fileName))
+  year = substring(fileName, start+1, underscoreDateInd-1)
+  month = substring(fileName, underscoreDateInd+1, stop-1)
+  
+  list = fread(paste0(fileName))
+  list$year = as.integer(paste0("20", year))
+  list$month = as.integer(month)
+  #list$date = paste(list$year, list$month, list$day, sep = "-")
+
+  
+  return(list)
+  
+}
+
+transpose_custom_Hourly = function(x){
+  key = x[,c("date", "hour", "parameter","Average", "Abbrev")]
+  key = as.data.frame(key)
+  key = key[,c("date",  "hour", "parameter","Average", "Abbrev")]
+  pollutantList = list()
+  chosenPollutants = c('SO2','CO','NO','NO2', 'PM2.5', 'PM10', 'O3', 'TOL','BEN','EBE','TCH','NMHC')
+  
+  for(i in 1:length(chosenPollutants)){
+    temp = key[key$Abbrev == chosenPollutants[i],]
+    names(temp)[names(temp) == 'Average'] = chosenPollutants[i]
+    temp$parameter = NULL
+    temp$Abbrev = NULL
+    
+    pollutantList[[i]] = temp
+  }
+
+  result = merge(pollutantList[[1]],pollutantList[[2]], 
+                 by = c("date", "hour"), all = T)
+  for(i in 3:12){
+    result = merge(result,pollutantList[[i]], by = c("date", "hour"), all = T)
+  }
+  
+  return(result)
+}
+
+
+
+transpose_custom_Daily = function(x){
+  key = x[,c("date", "parameter","Average", "Abbrev")]
+  key = as.data.frame(key)
+  key = key[,c("date", "parameter","Average", "Abbrev")]
+  pollutantList = list()
+  chosenPollutants = c('SO2','CO','NO','NO2', 'PM2.5', 'PM10', 'O3', 'TOL','BEN','EBE','TCH','NMHC')
+  
+  for(i in 1:length(chosenPollutants)){
+    temp = key[key$Abbrev == chosenPollutants[i],]
+    names(temp)[names(temp) == 'Average'] = chosenPollutants[i]
+    temp$parameter = NULL
+    temp$Abbrev = NULL
+    
+    pollutantList[[i]] = temp
+  }
+  
+  result = merge(pollutantList[[1]],pollutantList[[2]], by = c("date"), all = T)
+  for(i in 3:12){
+    result = merge(result,pollutantList[[i]], by = c("date"), all = T)
+  }
+  
+  return(result)
+}
+
+
+
+
+files = list.files()
+
+#Reading all files and adding Year & Month columns
+start_time <- Sys.time();
+dataProcessed = lapply(files, processFiles)
+```
+
+###<span style="color:blue; text-decoration:underline">DATA PREPARATION</span>
+
+```{r}
+#Rbinding all lists 
+dataProcessed2 = rbindlist(dataProcessed)
+
+#Replace NA's with 0's
+dataProcessed2[is.na(value),'value'] = 0
+
+
+#Averaging Madrid's Pollution Hourly over all different stations
+dataProcessed_HOURLY = dataProcessed2[,mean(value), by=c('year', 'month', 'day', 'hour', 'parameter')]
+colnames(dataProcessed_HOURLY)[6] = "Average"
+
+#Averaging Madrid's Pollution Daily
+dataProcessed_DAILY = dataProcessed2[,mean(value), by=c('year', 'month', 'day', 'parameter')]
+#dataProcessed_DAILY$WeekNo =  as.integer(strftime(dataProcessed_DAILY$date, format = "%W")) + 1
+colnames(dataProcessed_DAILY)[5] = "Average"
+
+#Creating the Date column & WeekNo for Daily and Hourly datasets
+dataProcessed_DAILY$date = make_date(year = dataProcessed_DAILY$year, month = dataProcessed_DAILY$month, day = dataProcessed_DAILY$day)
+dataProcessed_HOURLY$date = make_date(year = dataProcessed_HOURLY$year, month = dataProcessed_HOURLY$month, day = dataProcessed_HOURLY$day)
+dataProcessed_HOURLY$WeekNo = as.integer(strftime(dataProcessed_HOURLY$date, format = "%W")) + 1
+dataProcessed_DAILY$WeekNo = as.integer(strftime(dataProcessed_DAILY$date, format = "%W")) + 1
+
+#Averaging Madrid's Pollution Weekly
+dataProcessed_WEEKLY = dataProcessed_DAILY[,mean(Average, na.rm = TRUE), by = c('year', 'month', 'parameter', 'WeekNo')]
+colnames(dataProcessed_WEEKLY)[5] = "Average"
+
+#Averaging Madrid's Pollution Monthly
+dataProcessed_MONTHLY = dataProcessed_DAILY[,mean(Average, na.rm = TRUE), by = c('year', 'month', 'parameter')]
+colnames(dataProcessed_MONTHLY)[4] = "Average"
+```
+
+
+
+###<span style="color:blue; text-decoration:underline">Reading weather dataset and creating the Reference table</span>
+
+```{r}
+
+weatherFile = read.xlsx("./Weather/weather.xlsx", detectDates = TRUE)
+weatherFile$Year = year(weatherFile$date)
+weatherFile$Month = month(weatherFile$date)
+weatherFile$Day = day(weatherFile$date)
+#weatherFile$date = gsub(" ", "", gsub(" 0", "", format(weatherFile$date, "%Y- %m- %d")))
+
+weatherFile_DAILY = weatherFile
+
+#There are 54 weeks in our dataset because we add 1 to the weekno so that we dont start at 0 and the first
+#week doesnt start on Monday, we get an extra week
+weatherFile_DAILY$WeekNo =  as.integer(strftime(weatherFile_DAILY$date, format = "%W")) + 1
+
+#Creating the Parameters Reference Data
+referenceData = as.data.frame(matrix(c(01,"SO2", "muG/m^3", 06, "CO", "mG/m^3",  07, "NO", "muG/m^3", 08, "NO2", "muG/m^3", 09, "PM2.5", "muG/m^3",
+                                       10, "PM10", "muG/m^3", 12, "NOx", "muG/m^3", 14, "O3", "muG/m^3",
+                         20, "TOL", "muG/m^3", 30, "BEN", "muG/m^3", 35, "EBE", "muG/m^3", 37, "MXY", "muG/m^3", 
+                         38, "PXY", "muG/m^3", 39, "OXY", "muG/m^3",
+                         42, "TCH", "mG/m^3" ,
+                         43, "CH4", "mG/m^3" , 44, "NMHC", "mG/m^3"), ncol = 3, byrow = T))
+
+#Renaming Reference data Columns
+colnames(referenceData) = c("ID", "Abbrev", "Unit")
+
+#Converting ID column to integer
+referenceData$ID = as.integer(as.character(referenceData[,"ID"]))
+```
+
+###<span style="color:blue; text-decoration:underline">Merging Daily, Hourly Datasets with Reference Table</span>
+
+```{r}
+#Merging Hourly with Reference Data
+dataProcessed_HOURLY_Polutant = merge(dataProcessed_HOURLY, referenceData, by.x = "parameter", 
+                                      by.y = "ID", all.x = T)
+
+#Merging Daily with Reference Data
+dataProcessed_DAILY_Polutant = merge(dataProcessed_DAILY, referenceData, 
+                                     by.x = "parameter", by.y = "ID", all.x = T)
+  
+#Merging DAILY+Reference with Weather
+allData_DAILY = merge(dataProcessed_DAILY_Polutant, weatherFile_DAILY, 
+                      by.x = c("date","WeekNo"), by.y = c("date","WeekNo"), all.x = TRUE)
+
+```
+
+
+###<span style="color:blue; text-decoration:underline">Transposing Data</span>
+Here we built a dataframe with a column for each pollutant, frequency = hourly
+
+```{r}
+allData_HOURLY = transpose_custom_Hourly(dataProcessed_HOURLY_Polutant)
+kable(head(allData_HOURLY))
+```
+
+###<span style="color:blue; text-decoration:underline">Transposing Data</span>
+Here we built a dataframe with a column for each pollutant, frequency = daily
+
+```{r}
+transposed_Daily = transpose_custom_Daily(allData_DAILY)
+allData_DAY = merge(transposed_Daily, weatherFile, by = c("date"), all = T)
+
+allData_DAY$WeekNo = as.integer(strftime(allData_DAY$date, format = "%W")) + 1
+allData_DAY$yearmonth<-as.yearmon(allData_DAY$date)
+allData_DAY$yearmonthf<-factor(allData_DAY$yearmonth)
+allData_DAY$week <- as.numeric(allData_DAY$WeekNo)
+allData_DAY$month <- as.numeric(month(allData_DAY$date))
+allData_DAY<-ddply(allData_DAY,.(yearmonthf),transform,monthweek=1+WeekNo-min(WeekNo))
+
+
+allData_DAY$WeekDay <- weekdays(as.Date(allData_DAY$date))
+
+allData_DAY$monthf<-factor(allData_DAY$month,levels=as.character(1:12),
+                   labels=c("Jan","Feb","Mar","Apr","May",
+                            "Jun","Jul","Aug","Sep","Oct","Nov","Dec"),
+                   ordered=TRUE)
+
+
+#Weekly DataSet
+allData_Weekly = aggregate(x=allData_DAY[c('SO2','NO2', 'CO', 'O3', 'PM2.5')], by=allData_DAY[,c('Year','Month', 'WeekNo')], FUN = mean)
+
+```
+
+
+
+
+###<span style="color:blue; text-decoration:underline">DESCRIPTIVE ANALYSIS</span>
+
+
+
+
+```{r}
+#GRAPHS AND ANALYSIS
+
+#Histogram of Different Variables
+SO2_Hist = ggplot(allData_DAY, aes(allData_DAY$SO2)) + geom_histogram(bins = 50, color="green", fill = "blue") +
+labs(x="SO2", y="Density") + theme(axis.title = element_text(face = "bold"))
+
+NO2_Hist = ggplot(allData_DAY, aes(allData_DAY$NO2), color="red") + geom_histogram(bins = 50, color="green", fill = "blue") +
+  labs(x="NO2", y="Density") + theme(axis.title = element_text(face = "bold"))
+
+PM2.5_Hist = ggplot(allData_DAY, aes(allData_DAY$PM2.5)) + geom_histogram(bins = 50, color="green", fill = "blue") +
+  labs(x="PM2.5", y="Density") + theme(axis.title = element_text(face = "bold"))
+
+O3_Hist = ggplot(allData_DAY, aes(allData_DAY$O3)) + geom_histogram(bins = 50, color="green", fill = "blue") +
+  labs(x="O3", y="Density") + theme(axis.title = element_text(face = "bold"))
+
+grid.arrange(SO2_Hist, NO2_Hist, PM2.5_Hist, O3_Hist)
+```
+
+
+The histograms reveal that the 4 variables seem to be skewed. SO2, NO2, PM2.5 show a clear right tail, which indicates a left skew. O3 it not clear - it could be a left or right skew based on the graph. We will need to examine the boxplot to decide.
+
+
+
+```{r}
+#BoxPlot of the different Variables ####
+SO2_BoxPlot = ggplot(allData_DAY, aes(x=1, y=allData_DAY$SO2)) + geom_boxplot(color="#ef97e3") +
+  labs(x="SO2", y="Density") + theme_bw() + theme(axis.title = element_text(face = "bold"))  
+
+NO2_BoxPlot = ggplot(allData_DAY, aes(x=1, y=allData_DAY$NO2)) + geom_boxplot(color="#85c2d1") +
+  labs(x="NO2", y="Density") + theme_bw() + theme(axis.title = element_text(face = "bold")) 
+
+PM2.5_BoxPlot = ggplot(allData_DAY, aes(x=1, y=allData_DAY$PM2.5)) + geom_boxplot(color="#6c8c64") +
+  labs(x="PM2.5", y="Density") + theme_bw() + theme(axis.title = element_text(face = "bold"))  
+
+O3_BoxPlot = ggplot(allData_DAY, aes(x=1, y=allData_DAY$O3)) + geom_boxplot(color="#e8b95c") +
+  labs(x="O3", y="Density") + theme_bw() + theme(axis.title = element_text(face = "bold"))
+
+grid.arrange(SO2_BoxPlot, NO2_BoxPlot, PM2.5_BoxPlot, O3_BoxPlot)
+```
+
+Many outliers identified for SO2, NO2, PM2.5. However, we will not treat those outliers because they are relevant given the topic of our analysis: outliers in pollution is important to understand because they are likely the most harmful.
+No outliers found for O3. O3 show slight right skew in data (since median is to the right of mean).
+IQR highest for O3 as suspected, lowest for PM2.5. 
+Larger range between 3rd quartile and max and between 1st quartile and min for all variables.
+
+
+
+##<span style="color:blue; text-decoration:underline">Correlation Matrix</span>
+```{r}
+kable(round(cor(allData_DAY[,c('SO2','NO2','PM2.5','O3','temp_avg','temp_max','temp_min',
+                        'precipitation','humidity','wind_avg_speed')]),2))
+      
+corrplot(cor(allData_DAY[,c('SO2','NO2','PM2.5','O3','temp_avg','temp_max','temp_min',
+                        'precipitation','humidity','wind_avg_speed')]), type = "lower")
+```
+
+####The following relevant/strong correlations are observed for SO2:
+1. Strong positive correlation with NO2
+2. Negative correlation with O3
+3. Negative correlation with temperature
+4. Stronger negative correlation with temp_min than with temp_max
+5. No/Low correlation with precipitation/humidity/wind worth mentioning
+
+####The following relevant/strong correlations are observed for NO2
+1. Strong positive correlation with SO2 and PM2.5
+2. Strong negative correlation with O3
+3. Negative correlation with temperature
+4. Stronger negative correlation with temp_min than with temp_max
+5. Strong negative correlation with wind
+6. No correlation with precipitation/humidity worth mentioning
+
+####The following relevant/strong correlations are observed for PM2.5
+1. Strong positive correlation with NO2
+2. No correlation with temperature
+3. Negative correlation with wind
+4. No/Low correlation with precipitation/humidity worth mentioning  
+
+####The following relevant/strong correlations are observed for O3
+1. Strictly negative correlation with other pollutants (strong positive correlation with NO2,negative 2. Correlation with SO2, low negative correlation with PM2.5)
+3. Strictly strong positive correlation with temperature
+4. Strong negative correlation with humidity
+5. No/low correlation with precipitation/wind worth mentioning
+
+
+
+
+##<span style="color:blue; text-decoration:underline">Calendar Heat Map</span>
+
+```{r t, echo=FALSE}
+ui = fluidPage(
+      fluidRow(
+        inputPanel(radioButtons(inputId = "Pollutant" , "Pollutant", 
+                                 choices = c("SO2", "NO2", "O3", "PM2.5"), inline = TRUE, width = "100%")
+        ),
+
+        mainPanel(
+                   plotOutput(outputId = "lineplot"),
+                   tags$br(),
+                   tags$br()
+                   #dygraphOutput("lineplot3")
+          )
+        )
+
+  
+)
+
+
+server = function(input, output, session){
+  
+  output$lineplot <- renderPlot({
+    pollutantDS = allData_DAY[,c(input$Pollutant,'monthweek','WeekDay', 'monthf', 'Year')]
+    
+    ggplot(pollutantDS, aes(monthweek, WeekDay, fill = pollutantDS[,input$Pollutant])) + 
+      geom_tile(colour = "white") + 
+      facet_grid(Year~monthf) + 
+      scale_fill_gradient(low="green", high="red") +
+      labs(x="Week of Month",
+           y="",
+           title = paste("Average Polution of", toupper(input$Pollutant), "Over the Years"), 
+           subtitle="Madrid, Spain", 
+           fill="muG/m^3")
+  })
+  
+  output$lineplot3 <- renderDygraph({
+    
+    library(dygraphs)
+    
+    if(input$TimeCat == 'Weekly'){
+      x <- FinalData_Day_Weather_Weekly$WeekNo.y
+      y <- FinalData_Day_Weather_Weekly[,input$Pollutant]
+      dygraph(as.data.table(FinalData_Day_Weather_Weekly[,c('WeekNo',input$Pollutant)])) %>% dyRangeSelector()
+    }else if(input$TimeCat == 'Daily'){
+      x <- allData_DAY$date
+      y <- allData_DAY[,input$Pollutant]
+      dygraph(as.data.table(allData_DAY[,c('date',input$Pollutant)])) %>% dyRangeSelector() %>%
+        dyLimit(25, color = "red")
+    }
+    
+    #dygraph(as.data.table(FinalData_Day_Weather[,c('date',input$Pollutant)])) %>% dyRangeSelector()
+    
+    
+  })
+  
+}
+
+shinyApp(ui = ui, server = server, options = list(width="100%", height=600))
+
+```
+
+
+###<span style="color:blue; text-decoration:underline">Interactive Graph: Daily & Weekly</span>
+The interactive Graph lets us understand the behaviour of all variables across time. We can observe seasonality, which we expected.
+
+```{r echo=FALSE}
+ui = fluidPage(
+      fluidRow(
+        inputPanel(radioButtons(inputId = "Pollutant" , "Pollutant", 
+                              choices = c("SO2", "NO2", "O3", "PM2.5")),
+        selectInput(inputId = "TimeCat" , "Time Period", 
+                                 choices = c("Daily", "Weekly"))),
+      
+
+        mainPanel(
+                   dygraphOutput("lineplot3")
+          )
+        )
+
+  
+)
+
+
+server = function(input, output, session){
+  
+  output$lineplot3 <- renderDygraph({
+    
+    if(input$TimeCat == 'Weekly'){
+      x <- allData_Weekly$WeekNo
+      y <- allData_Weekly[,input$Pollutant]
+      dygraph(as.data.table(allData_Weekly[,c('WeekNo',input$Pollutant)])) %>% dyRangeSelector()
+    }else if(input$TimeCat == 'Daily'){
+      x <- allData_DAY$date
+      y <- allData_DAY[,input$Pollutant]
+      dygraph(as.data.table(allData_DAY[,c('date',input$Pollutant)])) %>% dyRangeSelector()
+    }
+    
+    #dygraph(as.data.table(FinalData_Day_Weather[,c('date',input$Pollutant)])) %>% dyRangeSelector()
+    
+    
+  })
+  
+}
+
+shinyApp(ui = ui, server = server, options = list(width="100%", height=600))
+```
+
+
+
+```{r}
+kable(head(allData_DAY))
+kable(str(allData_DAY))
+
+sd(allData_DAY$SO2) 
+sd(allData_DAY$NO2)
+sd(allData_DAY$PM2.5)
+sd(allData_DAY$O3)
+```
+
+
+###<span style="color:blue; text-decoration:underline">Plots of pollutants and weather variables</span>
+
+##### Plots of pollutants and weather variables
+The World Health Organization (WHO), studies pollutants as particulate matter (as PM2.5), ozone (O3), nitrogen dioxide (NO2), and sulfur dioxide (SO2) to evaluate air quality.
+In this section we studied the relationship between pollutants and weather variables and fixed their threshold to include it in the analysis.
+According to WHO, the behaviour of these pollutants is related to weather factors and human activities. In the case of SO2 and NO2, they are consequence of combustion processes such as heating, electricity generation and engines of vehicles and ships.
+Therefore, it is expected for them to increase during winter as consequence of the high industrial activity. O3 on the ther hand, is a product of the reaction between sunlight and pollutants such as nitrogen oxides (NOx). So it is expected for this pollutantto increase during summer.
+
+####For the following plots, we scaled the variables.
+Given that we scaled all the variables, we first conducted a quick analysis again.
+
+```{r}
+#Standardising particles data
+SO2_Scaled<-scale(allData_DAY$SO2)
+NO2_Scaled<-scale(allData_DAY$NO2)
+PM2.5_Scaled<-scale(allData_DAY$PM2.5)
+O3_Scaled<-scale(allData_DAY$O3)
+pollutants_Scaled = cbind(SO2_Scaled,NO2_Scaled,PM2.5_Scaled,O3_Scaled)
+colnames(pollutants_Scaled) = c('SO2_Scaled','NO2_Scaled','PM2.5_Scaled','O3_Scaled')
+kable(summary(pollutants_Scaled))
+```
+
+Once standardised, we can comment on mean, median, min, max, quartiles, IQR
+-sd irrelevant not that we have standardised the values
+-mean=0 for all variables due to standardisation
+-median for SO2, NO2, PM2.5 slightly below 0 i.e. sightly below mean. Slight left skew.
+-median for O3 slightly above 0 i.e. slightly above mean. Slight right skew.
+-Min values relatively similar amongst variables (between -1.57 and -1.92) 
+-Max values differ significantly amongst variables (between 2.73 and 8.87)
+-logical given we're looking at pollution where the lowest pollution level is 0 but highest pollution is theoretically unlimited
+-High max values (especially those >3stdev away from the mean) indicate: firstly that pollution is a real issue in Madrid, secondly that some pollutants occur in a more extreme ways (e.g. PM2.5), thirdly that there is a strong likelyhood of outliers for pollutants SO2, NO2, PM2.5
+-PM2.5 has largest range (Max-Min), almost twice as large as SO2 --> PM2.5 has very large spread
+-O3 has smallest range (Max-Min) 
+-O3 is the only pollutant where min/max is within 3stdev of the mean
+-Little differences observed in 1st quartile amongst variables ##Some differences observed in 3rd quartile amongst variables
+-O3 seems to have largest IQR, PM2.5 seems to have smallest IQR
+
+
+
+####Following the analysis, we continued with the plotting of pollutants and weather variables.
+
+```{r, fig.width=20, fig.height=12}
+#opts_chunk$set(dev = 'pdf')
+
+avg_temp_1 = ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(NO2),colour = "Scaled NO2")) + 
+  geom_line(aes(y = scale (temp_avg),colour = "Scaled temp_avg")) + ylab(label = "") + ggtitle("Evolution of NO2 and temperature") + theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled NO2","Scaled temp_avg"), values = c("#a0f7f0","#605254")) + geom_hline(aes(yintercept = ((200-mean(allData_DAY$NO2)))/sd(allData_DAY$NO2), linetype = "Scaled NO2 hourly Threshold") ) 
+
+avg_temp_2 = ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(SO2),colour = "Scaled SO2")) + 
+  geom_line(aes(y = scale (temp_avg),colour = "Scaled temp_avg")) + ylab(label = "") + ggtitle("Evolution of SO2 and temperature") + theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled SO2","Scaled temp_avg"), values = c("#ce273d","#605254")) + geom_hline(aes(yintercept = ((100-mean(allData_DAY$O3)))/sd(allData_DAY$O3), linetype = "Scaled O3 Threshold for every 8 hours") ) 
+
+avg_temp_3 = ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(O3),colour = "Scaled O3")) + 
+  geom_line(aes(y = scale (temp_avg),colour = "Scaled temp_avg")) + ylab(label = "") + ggtitle("Evolution of O3 and temperature") + theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled O3","Scaled temp_avg"), values = c("#f2c935","#605254")) + geom_hline(aes(yintercept = ((100-mean(allData_DAY$O3)))/sd(allData_DAY$O3), linetype = "Scaled O3 Threshold for every 8 hours") ) 
+
+
+grid.arrange(avg_temp_1,avg_temp_2, avg_temp_3)
+```
+
+As expected, we can observe the existence of a negative relationship between temperature with NO2 and SO2, and a positive one with O3. However, some periods of SO2 are no that well explained with temperature. Specifically, during the months of spring and summer SO2 doesn't diminish as much as we would expected and this pattern became more relevant during the spring of  2016. When looking at the literature, we found that SO2 becomes more toxic in contact with water, so we decided to analyze the relationship between SO2, precipitation and humidity. These allowed us to find a better explanationf for the 2016 spring period. During this period there was an increase on precipation and humidity. Notwithstanding that, precipitation doesn't appear to be such a good explanatory for SO2. This could be a consequence of the infrequency of rain in Madrid. 
+
+```{r}
+so2.1 = ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(SO2),colour = "Scaled SO2")) + 
+  geom_line(aes(y = scale (precipitation),colour = "Scaled precipitation")) +           ylab(label = "") + ggtitle("Evolution of SO2 and Precipitation") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled SO2","Scaled precipitation"), 
+                      values = c("#80a9ed","#ce273d")) + 
+  geom_hline(aes(yintercept = ((20-mean(allData_DAY$SO2)))/sd(allData_DAY$SO2),         linetype = "Scaled SO2 daily Threshold") ) 
+
+
+so2.2 = ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(SO2),colour = "Scaled SO2")) + 
+  geom_line(aes(y = scale (humidity),colour = "Scaled humidity")) +
+  ylab(label = "") + ggtitle("Evolution of SO2 and Humidity") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled SO2","Scaled humidity"), 
+                      values = c("#cb96e8","#ce273d")) + 
+  geom_hline(aes(yintercept = ((20-mean(allData_DAY$SO2)))/sd(allData_DAY$SO2),         linetype = "Scaled SO2 daily Threshold") ) 
+
+grid.arrange(so2.1,so2.2)
+
+```
+
+According to the litearute, PM2.5 is the consequence of combustion related to vechicles and other operations that involve the burning of fuels such as wood, heating oil or coal and natural sources such as forest and grass fires. So we would expect that it has a similar behaviour to the one showed by SO2 and NO2. However, when studying the evolution between pm2.5 and the variables associated with the climate, we did not find any clear relationship.
+
+```{r, fig.width=20, fig.height=12}
+pm2.5.1 = ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(PM2.5),colour = "Scaled PM2.5")) + 
+  geom_line(aes(y = scale (temp_avg),colour = "Scaled temp_avg")) +
+  ylab(label = "") + ggtitle("Evolution of PM2.5 and temperature") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled PM2.5","Scaled temp_avg"),
+                      values = c("#605254","#ed80a2")) +
+  geom_hline(aes(yintercept = ((25-mean(allData_DAY$PM2.5)))/sd(allData_DAY$PM2.5),     linetype = "Scaled PM2.5 daily Threshold") ) 
+
+
+pm2.5.2 =ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(PM2.5),colour = "Scaled PM2.5")) + 
+  geom_line(aes(y = scale (wind_avg_speed),colour = "Scaled wind_avg_speed")) +         ylab(label = "") + ggtitle("Evolution of PM2.5 and wind speed") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled PM2.5","Scaled wind_avg_speed"), 
+                      values = c("#dddb5f","#ed80a2")) +
+  geom_hline(aes(yintercept = ((25-mean(allData_DAY$PM2.5)))/sd(allData_DAY$PM2.5), 
+  linetype = "Scaled PM2.5 daily Threshold") ) 
+
+pm2.5.3 =ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(PM2.5),colour = "Scaled PM2.5")) + 
+  geom_line(aes(y = scale (humidity),colour = "Scaled humidity")) +
+  ylab(label = "") + ggtitle("Evolution of PM2.5 and humidity") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled PM2.5","Scaled humidity"),
+                      values = c("#62a55c","#ed80a2")) +
+  geom_hline(aes(yintercept = ((25-mean(allData_DAY$PM2.5)))/sd(allData_DAY$PM2.5),     linetype = "Scaled PM2.5 daily Threshold") ) 
+
+pm2.5.4 =ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(PM2.5),colour = "Scaled PM2.5")) + 
+  geom_line(aes(y = scale (precipitation),colour = "Scaled precipitation")) +           ylab(label = "") + ggtitle("Evolution of PM2.5 and precipitation") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled PM2.5","Scaled precipitation"), 
+                      values = c("#80a9ed","#ed80a2")) +
+  geom_hline(aes(yintercept = ((25-mean(allData_DAY$PM2.5)))/sd(allData_DAY$PM2.5),     linetype = "Scaled PM2.5 daily Threshold") ) 
+
+grid.arrange(pm2.5.1, pm2.5.2, pm2.5.3, pm2.5.4)
+```
+
+#####The literature also explains that PM2.5  emissions of particles, PM2.5 can also be formed from the chemical reactions of gases such as SO2 and NOx family gases.
+
+```{r}
+pm2.5.5 = ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(PM2.5),colour = "Scaled PM2.5")) + 
+  geom_line(aes(y = scale (NO2),colour = "Scaled NO2")) +
+  ylab(label = "") + ggtitle("Evolution of PM2.5 and NO2") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled PM2.5","Scaled NO2"), 
+                      values = c("#a0f7f0","#ed80a2")) +
+  geom_hline(aes(yintercept = ((25-mean(allData_DAY$PM2.5)))/sd(allData_DAY$PM2.5),     linetype = "Scaled PM2.5 daily Threshold") ) 
+
+
+pm2.5.6 = ggplot(allData_DAY, aes(date))+
+  geom_line(aes(y = scale(PM2.5),colour = "Scaled PM2.5")) + 
+  geom_line(aes(y = scale (SO2),colour = "Scaled SO2")) +
+  ylab(label = "") + ggtitle("Evolution of PM2.5 and SO2") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))  +
+  scale_colour_manual("", breaks= c("Scaled PM2.5","Scaled SO2"), 
+                      values = c("#ed80a2","#ce273d")) +
+  geom_hline(aes(yintercept = 
+                   ((25-mean(allData_DAY$PM2.5)))/sd(allData_DAY$PM2.5), linetype =     "Scaled PM2.5 daily Threshold") ) 
+
+grid.arrange(pm2.5.5, pm2.5.6)
+
+ggplot(allData_DAY,aes(date,NO2)) + geom_point(color="#2aa9d3") +
+        theme(axis.title = element_text(face = "bold"))
+
+```
+
+
+###Multi-linear Regression
+We split the sample in two, to train the model with one part of the data (75%), and later measure its prediction power on the part of the dataset it doesn't know
+
+```{r}
+smp_size <- floor(0.75 * nrow(allData_DAY))
+
+set.seed(123)
+train_ind <- sample(seq_len(nrow(allData_DAY)), size = smp_size)
+
+train <- allData_DAY[train_ind, ]
+test <- allData_DAY[-train_ind, ]
+
+```
+
+###Scatter Plots
+####The following plot depict the relationship between NO2 and other pollutants
+
+```{r}
+sc1 = ggplot(allData_DAY) + geom_point(aes(SO2, NO2), col="#2aa9d3") +
+        theme(axis.title = element_text(face = "bold"))
+sc2 = ggplot(allData_DAY) + geom_point(aes(PM2.5, NO2), col="#2aa9d3")+
+  theme(axis.title = element_text(face = "bold"))
+sc3 = ggplot(allData_DAY) + geom_point(aes(O3, NO2), col="#2aa9d3")+
+  theme(axis.title = element_text(face = "bold"))
+grid.arrange(sc1,sc2,sc3)
+```
+
+As evident from the scatter plots, all independent variables seem to be fit to be applied in a linear model. It should be noted that all 3 plots indicate the existence of outliers, which we already explained not to treat.
+
+
+####The following plot depict the relationship between NO2 and weather variables
+```{r}
+sc4 = ggplot(allData_DAY) + geom_point(aes(temp_avg, NO2), col="#2aa9d3") +
+  theme(axis.title = element_text(face = "bold"))
+sc5 = ggplot(allData_DAY) + geom_point(aes(temp_max, NO2), col="#2aa9d3")+
+  theme(axis.title = element_text(face = "bold"))
+sc6 = ggplot(allData_DAY) + geom_point(aes(temp_min, NO2), col="#2aa9d3")+
+  theme(axis.title = element_text(face = "bold"))
+sc7 = ggplot(allData_DAY) + geom_point(aes(precipitation, NO2), col="#2aa9d3")+
+  theme(axis.title = element_text(face = "bold"))
+sc8 = ggplot(allData_DAY) + geom_point(aes(humidity, NO2), col="#2aa9d3")+
+  theme(axis.title = element_text(face = "bold"))
+sc9 = ggplot(allData_DAY) + geom_point(aes(wind_avg_speed, NO2), col="#2aa9d3")+
+  theme(axis.title = element_text(face = "bold"))
+grid.arrange(sc4,sc5,sc6,sc7,sc8,sc9)
+```
+
+All three plots regarding temperature as well as the humidity plot seem fit to be used in a linear model.
+Percipitation has a lot a observations consolidated around 0 which is logical given the nature of percipitation. 
+Wind average speed indicates to have an exponential relationship with NO2. We therefore applied a logarithmic transformation.
+
+Logarithmic transformation of Wind:
+
+```{r}
+allData_DAY$wind_avg_speed_OLD = (allData_DAY$wind_avg_speed)
+allData_DAY$wind_avg_speed = log(allData_DAY$wind_avg_speed)
+
+sc10 = ggplot(allData_DAY) + geom_point(aes(wind_avg_speed, NO2), col="#2aa9d3")+
+  theme(axis.title = element_text(face = "bold"))
+
+```
+
+
+####Model
+First we run the model to explain NO2 with all the relevant pollutants to study air contamination and the weather variables.
+It doesn't make much sense to use the three variables of temperature in the first place.
+
+```{r}
+lm_train = lm(NO2~ SO2 + O3 + PM2.5 + temp_avg + temp_max + temp_min + precipitation + humidity 
+                        + wind_avg_speed, data = train)
+```
+
+We get and adjusted an Adjusted R squared of 0.83. According to this, our model has a power of explanation of 83%. We then proceed on running a stepwise on the variables to find the relevant variables for our model. This algorithm tries each variable, first with a constant and then with the different combinations of the variables. We run this algorithm in both directions, first as we explained before, and then starting with al the variables, and studying the consequences of removing one by one. This is called a stepwise runned in both directions.
+
+```{r}
+lm_vars_train = step(lm(NO2~ SO2 + O3 + PM2.5 + temp_avg + temp_max + temp_min + precipitation + humidity 
+                  + wind_avg_speed, data = train),direction="both")
+```
+
+When running the model, temp_avg appears as non significative. However, we find that it is more intuitive to explain the evolution of NO2 with the average temperature, rather than with minimum and the maximum.
+
+```{r}
+ml_train = lm( NO2~ SO2 + O3 + PM2.5 + temp_avg + precipitation + humidity + wind_avg_speed, data = train)
+
+summary(ml_train)
+```
+
+When running this, we don't get a better model in terms of R^2 adjusted. Indeed the ratio decreases from 0.84 to 0.83. Notwithsatanding that, all the variables are significative. We will scale the variables to perform a better analysis on its coefficients:
+
+```{r}
+ml_train.s = lm( scale(NO2)~ scale(SO2) + scale(O3) + scale(PM2.5) + scale(temp_avg) + scale(precipitation) 
+               + scale(humidity) + scale(wind_avg_speed), data = train)
+
+summary(ml_train.s)
+```
+
+The positive relationship with precipitation could be consequencue on the higher demand for motorized vehicles on rainy days. The smaller coefficient on precipitation could, again, be explained by the infrequency of rain in Madrid. Finally, we also think that the positive sign on PM2.5's coefficient is consequence of the role NO2 plays in PM2.5 generation.
+
+
+####Checking multicollinearity
+In order to check for multicollinearity in our final model, we calculated the Variance Inflation Factors.
+```{r}
+vif(ml_train.s)
+```
+Given that all variables have a VIF less than 10, there is no sigificant multicollinearity in the model.
+
+
+
+####Residual Analysis:
+In order to make good predictions, we need our residuals to distribute normally 
+
+```{r}
+lm.res = ml_train$residuals
+
+summary(lm.res) #the mean is close to zero.
+
+sd(lm.res) 
+
+# plot 1
+par(mfrow=c(2,2),mar=c(1,3.5,3.5,1))
+plot(lm.res, type='o', xlab='',ylab='',xaxt='n',lwd=2,pch=19, 
+     main='Simple Model Residuals', col="#a0f7f0"); grid()
+#axis(1,at=1:nrow(train),labels = train$SalePrice ,las=2)
+
+# plot 2 
+hist(lm.res, col = "#a0f7f0")
+
+# plot 3 
+boxplot(lm.res,main='Boxplot'); grid()
+
+# plot 4 
+qqnorm(lm.res, col="#a0f7f0"); grid()
+```
+
+Despite of some exceptions, on the middle of the series, the variance seems to be homoscedastic
+The distribution seems normal with a skewness to the left
+However, when analyzing the boxplot, we find that mean an median seems to share the same value. Both lower and upper whiskers share the same length, which points out that sales prices are equally varied on the highest and lowest prices. We can appreciate the existence of bigger outliers for the bottom of the distribution. 
+
+Since the points seem to fall about a straight line, we could say that the residuals follow a normal distribution. The little curve on the extremities could mean that there are more extreme values than the expected on a Normal distribution.
+
+On what it has to do with outliers, we won't remove them in this case, since we are trying to explain this behaviour on the variable.
+
+Overall, the assumptions of regression, namely normality, independence, constant variance and linearity can be considered to hold true for our model.
+
+
+
+####Prediction:
+
+```{r}
+pred_data = predict(ml_train,test)
+
+pred_data = as.data.frame(pred_data)
+
+test = cbind(test,pred_data)
+
+
+test$error = test$NO2 - test$pred_data
+
+ggplot(test, aes(error)) + geom_histogram(bins=30, color="green", fill = "blue") +
+  labs(x="Error", y="Frequency") + theme(axis.title = element_text(face = "bold"))
+
+summary(test$error) #the mean is close to 0 (-0.16)
+
+
+#Evaluation:
+ggplot(test, aes(pred_data, NO2)) + geom_point() + geom_point(aes(x=pred_data, y=pred_data), col="red") + theme(axis.title = element_text(face = "bold"))
+
+cor(test$NO2,test$pred_data) #correlation is 0.91
+```
+The residuals of the test data seem normally distributed. 
+The mean is very close to 0 (-0.16)
+The correlation between the model and the test is 0.91.
+All these findings indicate that our model has been validated through the test sample.
+
+
+
+
+###Predicting NO2 thresholds
+Finally we wanted to predict the cross on NO2 thresholds by the others pollutants violations on their own thresholds. Here we can observe the thresholds recommended by the WHO. 
+
+####PM2.5
+10 μg/m3 yearly average
+25 μg/m3 daily average
+
+####O3
+100 μg/m3 every 8h on average
+
+####NO2
+40 μg/m3 yearly average
+200 μg/m3 hourly average
+
+
+####SO2
+20 μg/m3 daily average
+500 μg/m3 every 10 min on average
+
+
+####To do this, we thought we could make a logit regression, being 1 the exceed of the threshold and 0 otherwise.
+
+```{r}
+alarms = allData_DAY
+
+alarms$al.PM2.5 = ifelse(alarms$PM2.5 >=25,1,0)
+summary(alarms$al.PM2.5)
+alarms$al.SO2 = ifelse(alarms$SO2 >=20,1,0) #It doesn't return any alarms
+summary(alarms$al.SO2)
+
+
+alarms2 = allData_HOURLY
+alarms2$al.NO2 = ifelse(alarms2$NO2 >=200,1,0) #It doesn't return any alarms.
+summary(alarms2$al.NO2)
+```
+####Having this results, we conclude we cannot proceed with our analysis. However, a report we found on the air quality of Madrid, states that both in 2015 and 2016, the the allowed threshold was exceeded.
+###https://www.ecologistasenaccion.org/IMG/pdf/info-calidad-aire-madrid-2016.pdf
+
+
+
+
+
+
